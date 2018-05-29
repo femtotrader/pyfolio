@@ -1,5 +1,5 @@
 #
-# Copyright 2016 Quantopian, Inc.
+# Copyright 2017 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,25 +14,27 @@
 # limitations under the License.
 from __future__ import division
 
-from time import time
 import warnings
+from time import time
 
-import matplotlib.pyplot as plt
+import empyrical as ep
+from IPython.display import display, Markdown
 import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
 import numpy as np
-import scipy.stats
 import pandas as pd
+import scipy.stats
 
-from . import timeseries
-from . import utils
-from . import pos
-from . import txn
-from . import round_trips
-from . import capacity
-from . import plotting
-from . import risk
 from . import _seaborn as sns
-import empyrical
+from . import capacity
+from . import perf_attrib
+from . import plotting
+from . import pos
+from . import risk
+from . import round_trips
+from . import timeseries
+from . import txn
+from . import utils
 
 try:
     from . import bayesian
@@ -42,6 +44,15 @@ except ImportError:
         "Could not import bayesian submodule due to missing pymc3 dependency.",
         ImportWarning)
     have_bayesian = False
+
+FACTOR_PARTITIONS = {
+    'style': ['momentum', 'size', 'value', 'reversal_short_term',
+              'volatility'],
+    'sector': ['basic_materials', 'consumer_cyclical', 'financial_services',
+               'real_estate', 'consumer_defensive', 'health_care',
+               'utilities', 'communication_services', 'energy', 'industrials',
+               'technology']
+}
 
 
 def timer(msg_body, previous_time):
@@ -68,14 +79,19 @@ def create_full_tear_sheet(returns,
                            cone_std=(1.0, 1.5, 2.0),
                            bootstrap=False,
                            unadjusted_returns=None,
-                           risk=False,
                            style_factor_panel=None,
                            sectors=None,
                            caps=None,
                            shares_held=None,
                            volumes=None,
                            percentile=None,
-                           set_context=True):
+                           turnover_denom='AGB',
+                           set_context=True,
+                           factor_returns=None,
+                           factor_loadings=None,
+                           pos_in_dollars=True,
+                           header_rows=None,
+                           factor_partitions=FACTOR_PARTITIONS):
     """
     Generate a number of tear sheets that are useful
     for analyzing a strategy's performance.
@@ -152,9 +168,25 @@ def create_full_tear_sheet(returns,
     bootstrap : boolean (optional)
         Whether to perform bootstrap analysis for the performance
         metrics. Takes a few minutes longer.
+    turnover_denom : str
+        Either AGB or portfolio_value, default AGB.
+        - See full explanation in txn.get_turnover.
+    factor_returns : pd.Dataframe, optional
+        Returns by factor, with date as index and factors as columns
+    factor_loadings : pd.Dataframe, optional
+        Factor loadings for all days in the date range, with date and
+        ticker as index, and factors as columns.
+    pos_in_dollars : boolean, optional
+        indicates whether positions is in dollars
+    header_rows : dict or OrderedDict, optional
+        Extra rows to display at the top of the perf stats table.
     set_context : boolean, optional
         If True, set default plotting style context.
          - See plotting.context().
+    factor_partitions : dict, optional
+        dict specifying how factors should be separated in perf attrib
+        factor returns and risk exposures plots
+        - See create_perf_attrib_tear_sheet().
     """
 
     if benchmark_rets is None:
@@ -162,10 +194,9 @@ def create_full_tear_sheet(returns,
 
     if (unadjusted_returns is None) and (slippage is not None) and\
        (transactions is not None):
-        turnover = txn.get_turnover(positions, transactions,
-                                    period=None, average=False)
         unadjusted_returns = returns.copy()
-        returns = txn.adjust_returns_for_slippage(returns, turnover, slippage)
+        returns = txn.adjust_returns_for_slippage(returns, positions,
+                                                  transactions, slippage)
 
     positions = utils.check_intraday(estimate_intraday, returns,
                                      positions, transactions)
@@ -178,6 +209,8 @@ def create_full_tear_sheet(returns,
         cone_std=cone_std,
         benchmark_rets=benchmark_rets,
         bootstrap=bootstrap,
+        turnover_denom=turnover_denom,
+        header_rows=header_rows,
         set_context=set_context)
 
     create_interesting_times_tear_sheet(returns,
@@ -206,13 +239,20 @@ def create_full_tear_sheet(returns,
 
             if market_data is not None:
                 create_capacity_tear_sheet(returns, positions, transactions,
-                                           market_data, daily_vol_limit=0.2,
+                                           market_data,
+                                           liquidation_daily_vol_limit=0.2,
                                            last_n_days=125,
                                            estimate_intraday=False)
 
         if style_factor_panel is not None:
             create_risk_tear_sheet(positions, style_factor_panel, sectors,
                                    caps, shares_held, volumes, percentile)
+
+        if factor_returns is not None and factor_loadings is not None:
+            create_perf_attrib_tear_sheet(returns, positions, factor_returns,
+                                          factor_loadings, transactions,
+                                          pos_in_dollars=pos_in_dollars,
+                                          factor_partitions=factor_partitions)
 
     if bayesian:
         create_bayesian_tear_sheet(returns,
@@ -221,13 +261,16 @@ def create_full_tear_sheet(returns,
                                    set_context=set_context)
 
 
+@plotting.customize
 def create_simple_tear_sheet(returns,
                              positions=None,
                              transactions=None,
                              benchmark_rets=None,
                              slippage=None,
                              estimate_intraday='infer',
-                             live_start_date=None):
+                             live_start_date=None,
+                             turnover_denom='AGB',
+                             header_rows=None):
     """
     Simpler version of create_full_tear_sheet; generates summary performance
     statistics and important plots as a single image.
@@ -237,7 +280,6 @@ def create_simple_tear_sheet(returns,
         daily turnover, transaction time distribution.
     - Never accept market_data input (market_data = None)
     - Never accept sector_mappings input (sector_mappings = None)
-    - Never attempt to infer intraday strategy (estimate_intraday = False)
     - Never perform bootstrap analysis (bootstrap = False)
     - Never hide posistions on top 10 holdings plot (hide_positions = False)
     - Always use default cone_std (cone_std = (1.0, 1.5, 2.0))
@@ -284,6 +326,13 @@ def create_simple_tear_sheet(returns,
     live_start_date : datetime, optional
         The point in time when the strategy began live trading,
         after its backtest period. This datetime should be normalized.
+    turnover_denom : str, optional
+        Either AGB or portfolio_value, default AGB.
+        - See full explanation in txn.get_turnover.
+    header_rows : dict or OrderedDict, optional
+        Extra rows to display at the top of the perf stats table.
+    set_context : boolean, optional
+        If True, set default plotting style context.
     """
 
     positions = utils.check_intraday(estimate_intraday, returns,
@@ -293,9 +342,8 @@ def create_simple_tear_sheet(returns,
         benchmark_rets = utils.get_symbol_rets('SPY')
 
     if (slippage is not None) and (transactions is not None):
-        turnover = txn.get_turnover(positions, transactions,
-                                    period=None, average=False)
-        returns = txn.adjust_returns_for_slippage(returns, turnover, slippage)
+        returns = txn.adjust_returns_for_slippage(returns, positions,
+                                                  transactions, slippage)
 
     if (positions is not None) and (transactions is not None):
         vertical_sections = 11
@@ -307,20 +355,20 @@ def create_simple_tear_sheet(returns,
     # Plot simple returns tear sheet
     returns = returns[returns.index > benchmark_rets.index[0]]
 
-    print("Entire data start date: %s" % returns.index[0].strftime('%Y-%m-%d'))
-    print("Entire data end date: %s" % returns.index[-1].strftime('%Y-%m-%d'))
     plotting.show_perf_stats(returns,
                              benchmark_rets,
                              positions=positions,
                              transactions=transactions,
-                             live_start_date=live_start_date)
+                             turnover_denom=turnover_denom,
+                             live_start_date=live_start_date,
+                             header_rows=header_rows)
 
     if returns.index[0] < benchmark_rets.index[0]:
         returns = returns[returns.index > benchmark_rets.index[0]]
 
     if live_start_date is not None:
         vertical_sections += 1
-        live_start_date = utils.get_utc_timestamp(live_start_date)
+        live_start_date = ep.utils.get_utc_timestamp(live_start_date)
 
     fig = plt.figure(figsize=(14, vertical_sections * 6))
     gs = gridspec.GridSpec(vertical_sections, 3, wspace=0.5, hspace=0.5)
@@ -391,6 +439,7 @@ def create_simple_tear_sheet(returns,
         plt.setp(ax.get_xticklabels(), visible=True)
 
     plt.show()
+    plt.close(fig)
 
 
 @plotting.customize
@@ -400,6 +449,8 @@ def create_returns_tear_sheet(returns, positions=None,
                               cone_std=(1.0, 1.5, 2.0),
                               benchmark_rets=None,
                               bootstrap=False,
+                              turnover_denom='AGB',
+                              header_rows=None,
                               return_fig=False):
     """
     Generate a number of plots for analyzing a strategy's returns.
@@ -420,6 +471,9 @@ def create_returns_tear_sheet(returns, positions=None,
     positions : pd.DataFrame, optional
         Daily net position values.
          - See full explanation in create_full_tear_sheet.
+    transactions : pd.DataFrame, optional
+        Executed trade volumes and fill prices.
+        - See full explanation in create_full_tear_sheet.
     live_start_date : datetime, optional
         The point in time when the strategy began live trading,
         after its backtest period.
@@ -431,13 +485,16 @@ def create_returns_tear_sheet(returns, positions=None,
     benchmark_rets : pd.Series, optional
         Daily noncumulative returns of the benchmark.
          - This is in the same style as returns.
-    bootstrap : boolean (optional)
+    bootstrap : boolean, optional
         Whether to perform bootstrap analysis for the performance
         metrics. Takes a few minutes longer.
+    turnover_denom : str, optional
+        Either AGB or portfolio_value, default AGB.
+        - See full explanation in txn.get_turnover.
+    header_rows : dict or OrderedDict, optional
+        Extra rows to display at the top of the perf stats table.
     return_fig : boolean, optional
         If True, returns the figure that was plotted on.
-    set_context : boolean, optional
-        If True, set default plotting style context.
     """
 
     if benchmark_rets is None:
@@ -445,14 +502,13 @@ def create_returns_tear_sheet(returns, positions=None,
 
     returns = returns[returns.index > benchmark_rets.index[0]]
 
-    print("Entire data start date: %s" % returns.index[0].strftime('%Y-%m-%d'))
-    print("Entire data end date: %s" % returns.index[-1].strftime('%Y-%m-%d'))
-
     plotting.show_perf_stats(returns, benchmark_rets,
                              positions=positions,
                              transactions=transactions,
+                             turnover_denom=turnover_denom,
                              bootstrap=bootstrap,
-                             live_start_date=live_start_date)
+                             live_start_date=live_start_date,
+                             header_rows=header_rows)
 
     plotting.show_worst_drawdown_periods(returns)
 
@@ -464,7 +520,7 @@ def create_returns_tear_sheet(returns, positions=None,
 
     if live_start_date is not None:
         vertical_sections += 1
-        live_start_date = utils.get_utc_timestamp(live_start_date)
+        live_start_date = ep.utils.get_utc_timestamp(live_start_date)
 
     if bootstrap:
         vertical_sections += 1
@@ -579,6 +635,8 @@ def create_returns_tear_sheet(returns, positions=None,
     plt.show()
     if return_fig:
         return fig
+    else:
+        plt.close(fig)
 
 
 @plotting.customize
@@ -610,11 +668,12 @@ def create_position_tear_sheet(returns, positions,
         Overrides show_and_plot_top_pos to 0 to suppress text output.
     return_fig : boolean, optional
         If True, returns the figure that was plotted on.
-    set_context : boolean, optional
-        If True, set default plotting style context.
     sector_mappings : dict or pd.Series, optional
         Security identifier to sector mapping.
         Security ids as keys, sectors as values.
+    transactions : pd.DataFrame, optional
+        Prices and amounts of executed trades. One row per trade.
+         - See full explanation in create_full_tear_sheet.
     estimate_intraday: boolean or str, optional
         Approximate returns for intraday strategies.
         See description in create_full_tear_sheet.
@@ -674,6 +733,8 @@ def create_position_tear_sheet(returns, positions,
     plt.show()
     if return_fig:
         return fig
+    else:
+        plt.close(fig)
 
 
 @plotting.customize
@@ -739,14 +800,14 @@ def create_txn_tear_sheet(returns, positions, transactions,
     if unadjusted_returns is not None:
         ax_slippage_sweep = plt.subplot(gs[4, :])
         plotting.plot_slippage_sweep(unadjusted_returns,
-                                     transactions,
                                      positions,
+                                     transactions,
                                      ax=ax_slippage_sweep
                                      )
         ax_slippage_sensitivity = plt.subplot(gs[5, :])
         plotting.plot_slippage_sensitivity(unadjusted_returns,
-                                           transactions,
                                            positions,
+                                           transactions,
                                            ax=ax_slippage_sensitivity
                                            )
     for ax in fig.axes:
@@ -755,6 +816,8 @@ def create_txn_tear_sheet(returns, positions, transactions,
     plt.show()
     if return_fig:
         return fig
+    else:
+        plt.close(fig)
 
 
 @plotting.customize
@@ -831,7 +894,7 @@ def create_round_trip_tear_sheet(returns, positions, transactions,
 
     trade_holding_times = [x.days for x in trades['duration']]
     sns.distplot(trade_holding_times, kde=False, ax=ax_holding_time)
-    ax_holding_time.set(xlabel='holding time in days')
+    ax_holding_time.set(xlabel='Holding time in days')
 
     sns.distplot(trades.pnl, kde=False, ax=ax_pnl_per_round_trip_dollars)
     ax_pnl_per_round_trip_dollars.set(xlabel='PnL per round-trip trade in $')
@@ -846,6 +909,8 @@ def create_round_trip_tear_sheet(returns, positions, transactions,
     plt.show()
     if return_fig:
         return fig
+    else:
+        plt.close(fig)
 
 
 @plotting.customize
@@ -872,8 +937,6 @@ def create_interesting_times_tear_sheet(
          The legend's location.
     return_fig : boolean, optional
         If True, returns the figure that was plotted on.
-    set_context : boolean, optional
-        If True, set default plotting style context.
     """
 
     rets_interesting = timeseries.extract_interesting_date_ranges(returns)
@@ -887,7 +950,7 @@ def create_interesting_times_tear_sheet(
                       .describe().transpose()
                       .loc[:, ['mean', 'min', 'max']] * 100,
                       name='Stress Events',
-                      fmt='{0:.2f}%')
+                      float_format='{0:.2f}%'.format)
 
     if benchmark_rets is None:
         benchmark_rets = utils.get_symbol_rets('SPY')
@@ -909,20 +972,22 @@ def create_interesting_times_tear_sheet(
 
         # i=0 -> 0, i=1 -> 0, i=2 -> 1 ;; i=0 -> 0, i=1 -> 1, i=2 -> 0
         ax = plt.subplot(gs[int(i / 2.0), i % 2])
-        empyrical.cum_returns(rets_period).plot(
+        ep.cum_returns(rets_period).plot(
             ax=ax, color='forestgreen', label='algo', alpha=0.7, lw=2)
-        empyrical.cum_returns(bmark_interesting[name]).plot(
+        ep.cum_returns(bmark_interesting[name]).plot(
             ax=ax, color='gray', label='SPY', alpha=0.6)
-        ax.legend(['algo',
+        ax.legend(['Algo',
                    'SPY'],
-                  loc=legend_loc)
-        ax.set_title(name, size=14)
+                  loc=legend_loc, frameon=True, framealpha=0.5)
+        ax.set_title(name)
         ax.set_ylabel('Returns')
         ax.set_xlabel('')
 
     plt.show()
     if return_fig:
         return fig
+    else:
+        plt.close(fig)
 
 
 @plotting.customize
@@ -1017,7 +1082,7 @@ def create_capacity_tear_sheet(returns, positions, transactions,
     llt = capacity.get_low_liquidity_transactions(
         transactions, market_data, last_n_days=last_n_days)
 
-    print("last {} trading days:".format(last_n_days))
+    print("Last {} trading days:".format(last_n_days))
     utils.print_table(
         llt[llt['max_pct_bar_consumed'] > trade_daily_vol_limit * 100])
 
@@ -1034,7 +1099,8 @@ def create_capacity_tear_sheet(returns, positions, transactions,
 @plotting.customize
 def create_bayesian_tear_sheet(returns, benchmark_rets=None,
                                live_start_date=None, samples=2000,
-                               return_fig=False, stoch_vol=False):
+                               return_fig=False, stoch_vol=False,
+                               progressbar=True):
     """
     Generate a number of Bayesian distributions and a Bayesian
     cone plot of returns.
@@ -1058,10 +1124,10 @@ def create_bayesian_tear_sheet(returns, benchmark_rets=None,
         Number of posterior samples to draw.
     return_fig : boolean, optional
         If True, returns the figure that was plotted on.
-    set_context : boolean, optional
-        If True, set default plotting style context.
     stoch_vol : boolean, optional
         If True, run and plot the stochastic volatility model
+    progressbar : boolean, optional
+        If True, show a progress bar
     """
 
     if not have_bayesian:
@@ -1088,10 +1154,10 @@ def create_bayesian_tear_sheet(returns, benchmark_rets=None,
                                               'Fama-French'):
         fama_french = True
         rolling_window = utils.APPROX_BDAYS_PER_MONTH * 6
-        benchmark_rets = timeseries.rolling_fama_french(
+        benchmark_rets = timeseries.rolling_regression(
             returns, rolling_window=rolling_window)
 
-    live_start_date = utils.get_utc_timestamp(live_start_date)
+    live_start_date = ep.utils.get_utc_timestamp(live_start_date)
     df_train = returns.loc[returns.index < live_start_date]
     df_test = returns.loc[returns.index >= live_start_date]
 
@@ -1103,14 +1169,16 @@ def create_bayesian_tear_sheet(returns, benchmark_rets=None,
 
     trace_t, ppc_t = bayesian.run_model('t', df_train,
                                         returns_test=df_test,
-                                        samples=samples, ppc=True)
+                                        samples=samples, ppc=True,
+                                        progressbar=progressbar)
     previous_time = timer("T model", previous_time)
 
     # Compute BEST model
     print("\nRunning BEST model")
     trace_best = bayesian.run_model('best', df_train,
                                     returns_test=df_test,
-                                    samples=samples)
+                                    samples=samples,
+                                    progressbar=progressbar)
     previous_time = timer("BEST model", previous_time)
 
     # Plot results
@@ -1182,7 +1250,8 @@ def create_bayesian_tear_sheet(returns, benchmark_rets=None,
     benchmark_rets = benchmark_rets.loc[df_train.index]
     trace_alpha_beta = bayesian.run_model('alpha_beta', df_train,
                                           bmark=benchmark_rets,
-                                          samples=samples)
+                                          samples=samples,
+                                          progressbar=progressbar)
     previous_time = timer("running alpha beta model", previous_time)
 
     # Plot alpha and beta
@@ -1197,7 +1266,7 @@ def create_bayesian_tear_sheet(returns, benchmark_rets=None,
         for i in range(nbeta):
             sns.distplot(trace_alpha_beta['beta'][100:, i], ax=ax_beta,
                          label=betas[i])
-        plt.legend()
+        plt.legend(frameon=True, framealpha=0.5)
     else:
         sns.distplot((1 + trace_alpha_beta['alpha'][100:])**252 - 1,
                      ax=ax_alpha)
@@ -1237,6 +1306,8 @@ def create_bayesian_tear_sheet(returns, benchmark_rets=None,
     plt.show()
     if return_fig:
         return fig
+    else:
+        plt.close(fig)
 
 
 @plotting.customize
@@ -1279,7 +1350,7 @@ def create_risk_tear_sheet(positions,
         2017-04-04	  -0.73381     0.98149
         2017-04-05	  -0.90132	   1.13981
 
-    sector : pd.DataFrame
+    sectors : pd.DataFrame
         Daily Morningstar sector code per asset
         - DataFrame with dates as index and equities as columns
         - Example:
@@ -1418,3 +1489,128 @@ def create_risk_tear_sheet(positions,
     plt.show()
     if return_fig:
         return fig
+    else:
+        plt.close(fig)
+
+
+@plotting.customize
+def create_perf_attrib_tear_sheet(returns,
+                                  positions,
+                                  factor_returns,
+                                  factor_loadings,
+                                  transactions=None,
+                                  pos_in_dollars=True,
+                                  return_fig=False,
+                                  factor_partitions=FACTOR_PARTITIONS):
+    """
+    Generate plots and tables for analyzing a strategy's performance.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        Returns for each day in the date range.
+
+    positions: pd.DataFrame
+        Daily holdings (in dollars or percentages), indexed by date.
+        Will be converted to percentages if positions are in dollars.
+        Short positions show up as cash in the 'cash' column.
+
+    factor_returns : pd.DataFrame
+        Returns by factor, with date as index and factors as columns
+
+    factor_loadings : pd.DataFrame
+        Factor loadings for all days in the date range, with date
+        and ticker as index, and factors as columns.
+
+    transactions : pd.DataFrame, optional
+        Prices and amounts of executed trades. One row per trade.
+         - See full explanation in create_full_tear_sheet.
+         - Default is None.
+
+    pos_in_dollars : boolean, optional
+        Flag indicating whether `positions` are in dollars or percentages
+        If True, positions are in dollars.
+
+    return_fig : boolean, optional
+        If True, returns the figure that was plotted on.
+
+    factor_partitions : dict
+        dict specifying how factors should be separated in factor returns
+        and risk exposures plots
+        - Example:
+          {'style': ['momentum', 'size', 'value', ...],
+           'sector': ['technology', 'materials', ... ]}
+    """
+    portfolio_exposures, perf_attrib_data = perf_attrib.perf_attrib(
+        returns, positions, factor_returns, factor_loadings, transactions,
+        pos_in_dollars=pos_in_dollars
+    )
+
+    display(Markdown("## Performance Relative to Common Risk Factors"))
+
+    # aggregate perf attrib stats and show summary table
+    perf_attrib.show_perf_attrib_stats(returns, positions, factor_returns,
+                                       factor_loadings, transactions,
+                                       pos_in_dollars)
+
+    # one section for the returns plot, and for each factor grouping
+    # one section for factor returns, and one for risk exposures
+    vertical_sections = 1 + 2 * max(len(factor_partitions), 1)
+    current_section = 0
+
+    fig = plt.figure(figsize=[14, vertical_sections * 6])
+
+    gs = gridspec.GridSpec(vertical_sections, 1,
+                           wspace=0.5, hspace=0.5)
+
+    perf_attrib.plot_returns(perf_attrib_data,
+                             ax=plt.subplot(gs[current_section]))
+    current_section += 1
+
+    if factor_partitions is not None:
+
+        for factor_type, partitions in factor_partitions.iteritems():
+
+            columns_to_select = perf_attrib_data.columns.intersection(
+                partitions
+            )
+
+            perf_attrib.plot_factor_contribution_to_perf(
+                perf_attrib_data[columns_to_select],
+                ax=plt.subplot(gs[current_section]),
+                title=(
+                    'Cumulative common {} returns attribution'
+                ).format(factor_type)
+            )
+            current_section += 1
+
+        for factor_type, partitions in factor_partitions.iteritems():
+
+            perf_attrib.plot_risk_exposures(
+                portfolio_exposures[portfolio_exposures.columns
+                                    .intersection(partitions)],
+                ax=plt.subplot(gs[current_section]),
+                title='Daily {} factor exposures'.format(factor_type)
+            )
+            current_section += 1
+
+    else:
+
+        perf_attrib.plot_factor_contribution_to_perf(
+            perf_attrib_data,
+            ax=plt.subplot(gs[current_section])
+        )
+        current_section += 1
+
+        perf_attrib.plot_risk_exposures(
+            portfolio_exposures,
+            ax=plt.subplot(gs[current_section])
+        )
+
+    gs.tight_layout(fig)
+
+    plt.show()
+    if return_fig:
+        return fig
+    else:
+        plt.close(fig)
