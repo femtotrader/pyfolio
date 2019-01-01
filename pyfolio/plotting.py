@@ -1,5 +1,5 @@
 #
-# Copyright 2017 Quantopian, Inc.
+# Copyright 2018 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -138,72 +138,6 @@ def axes_style(style='darkgrid', rc=None):
         rc.setdefault(name, val)
 
     return sns.axes_style(style=style, rc=rc)
-
-
-def plot_rolling_fama_french(returns,
-                             factor_returns=None,
-                             rolling_window=APPROX_BDAYS_PER_MONTH * 6,
-                             legend_loc='best',
-                             ax=None, **kwargs):
-    """
-    Plots rolling Fama-French single factor betas.
-
-    Specifically, plots SMB, HML, and UMD vs. date with a legend.
-
-    Parameters
-    ----------
-    returns : pd.Series
-        Daily returns of the strategy, noncumulative.
-         - See full explanation in tears.create_full_tear_sheet.
-    factor_returns : pd.DataFrame, optional
-        data set containing the Fama-French risk factors. See
-        utils.load_portfolio_risk_factors.
-    rolling_window : int, optional
-        The days window over which to compute the beta.
-    legend_loc : matplotlib.loc, optional
-        The location of the legend on the plot.
-    ax : matplotlib.Axes, optional
-        Axes upon which to plot.
-    **kwargs, optional
-        Passed to plotting function.
-
-    Returns
-    -------
-    ax : matplotlib.Axes
-        The axes that were plotted on.
-    """
-
-    if ax is None:
-        ax = plt.gca()
-
-    ax.set_title(
-        "Rolling Fama-French single factor betas (%.0f-month)" % (
-            rolling_window / APPROX_BDAYS_PER_MONTH
-        )
-    )
-
-    ax.set_ylabel('Beta')
-
-    rolling_beta = timeseries.rolling_regression(
-        returns,
-        factor_returns=factor_returns,
-        rolling_window=rolling_window)
-
-    rolling_beta = rolling_beta[['SMB', 'HML', 'Mom']]
-    rolling_beta.plot(alpha=0.7, ax=ax, **kwargs)
-
-    ax.axhline(0.0, color='black')
-    ax.legend(['Small cap (SMB)',
-               'High growth (HML)',
-               'Momentum (UMD)'],
-              loc=legend_loc, frameon=True, framealpha=0.5)
-
-    y_axis_formatter = FuncFormatter(utils.two_dec_places)
-    ax.yaxis.set_major_formatter(FuncFormatter(y_axis_formatter))
-    ax.axhline(0.0, color='black')
-    ax.set_xlabel('')
-    ax.set_ylim((-1.0, 1.0))
-    return ax
 
 
 def plot_monthly_returns_heatmap(returns, ax=None, **kwargs):
@@ -566,9 +500,10 @@ def plot_perf_stats(returns, factor_returns, ax=None):
     returns : pd.Series
         Daily returns of the strategy, noncumulative.
          - See full explanation in tears.create_full_tear_sheet.
-    factor_returns : pd.DataFrame, optional
-        data set containing the Fama-French risk factors. See
-        utils.load_portfolio_risk_factors.
+    factor_returns : pd.Series
+        Daily noncumulative returns of the benchmark factor to which betas are
+        computed. Usually a benchmark such as market returns.
+         - This is in the same style as returns.
     ax : matplotlib.Axes, optional
         Axes upon which to plot.
 
@@ -601,7 +536,7 @@ STAT_FUNCS_PCT = [
 ]
 
 
-def show_perf_stats(returns, factor_returns, positions=None,
+def show_perf_stats(returns, factor_returns=None, positions=None,
                     transactions=None, turnover_denom='AGB',
                     live_start_date=None, bootstrap=False,
                     header_rows=None):
@@ -619,8 +554,9 @@ def show_perf_stats(returns, factor_returns, positions=None,
     returns : pd.Series
         Daily returns of the strategy, noncumulative.
          - See full explanation in tears.create_full_tear_sheet.
-    factor_returns : pd.Series
-        Daily noncumulative returns of the benchmark.
+    factor_returns : pd.Series, optional
+        Daily noncumulative returns of the benchmark factor to which betas are
+        computed. Usually a benchmark such as market returns.
          - This is in the same style as returns.
     positions : pd.DataFrame, optional
         Daily net position values.
@@ -797,7 +733,8 @@ def plot_rolling_returns(returns,
         Daily returns of the strategy, noncumulative.
          - See full explanation in tears.create_full_tear_sheet.
     factor_returns : pd.Series, optional
-        Daily noncumulative returns of a risk factor.
+        Daily noncumulative returns of the benchmark factor to which betas are
+        computed. Usually a benchmark such as market returns.
          - This is in the same style as returns.
     live_start_date : datetime, optional
         The date when the strategy began live trading, after
@@ -841,7 +778,7 @@ def plot_rolling_returns(returns,
     ax.set_yscale('log' if logy else 'linear')
 
     if volatility_match and factor_returns is None:
-        raise ValueError('volatility_match requires passing of'
+        raise ValueError('volatility_match requires passing of '
                          'factor_returns.')
     elif volatility_match and factor_returns is not None:
         bmark_vol = factor_returns.loc[returns.index].std()
@@ -909,8 +846,9 @@ def plot_rolling_beta(returns, factor_returns, legend_loc='best',
     returns : pd.Series
         Daily returns of the strategy, noncumulative.
          - See full explanation in tears.create_full_tear_sheet.
-    factor_returns : pd.Series, optional
-        Daily noncumulative returns of the benchmark.
+    factor_returns : pd.Series
+        Daily noncumulative returns of the benchmark factor to which betas are
+        computed. Usually a benchmark such as market returns.
          - This is in the same style as returns.
     legend_loc : matplotlib.loc, optional
         The location of the legend on the plot.
@@ -962,7 +900,9 @@ def plot_rolling_volatility(returns, factor_returns=None,
         Daily returns of the strategy, noncumulative.
          - See full explanation in tears.create_full_tear_sheet.
     factor_returns : pd.Series, optional
-        Daily noncumulative returns of the benchmark.
+        Daily noncumulative returns of the benchmark factor to which betas are
+        computed. Usually a benchmark such as market returns.
+         - This is in the same style as returns.
     rolling_window : int, optional
         The days window over which to compute the volatility.
     legend_loc : matplotlib.loc, optional
@@ -1005,7 +945,7 @@ def plot_rolling_volatility(returns, factor_returns=None,
 
     ax.set_ylabel('Volatility')
     ax.set_xlabel('')
-    if factor_returns.empty:
+    if factor_returns is None:
         ax.legend(['Volatility', 'Average volatility'],
                   loc=legend_loc, frameon=True, framealpha=0.5)
     else:
@@ -1014,7 +954,8 @@ def plot_rolling_volatility(returns, factor_returns=None,
     return ax
 
 
-def plot_rolling_sharpe(returns, rolling_window=APPROX_BDAYS_PER_MONTH * 6,
+def plot_rolling_sharpe(returns, factor_returns=None,
+                        rolling_window=APPROX_BDAYS_PER_MONTH * 6,
                         legend_loc='best', ax=None, **kwargs):
     """
     Plots the rolling Sharpe ratio versus date.
@@ -1024,6 +965,11 @@ def plot_rolling_sharpe(returns, rolling_window=APPROX_BDAYS_PER_MONTH * 6,
     returns : pd.Series
         Daily returns of the strategy, noncumulative.
          - See full explanation in tears.create_full_tear_sheet.
+    factor_returns : pd.Series, optional
+        Daily noncumulative returns of the benchmark factor for
+        which the benchmark rolling Sharpe is computed. Usually
+        a benchmark such as market returns.
+         - This is in the same style as returns.
     rolling_window : int, optional
         The days window over which to compute the sharpe ratio.
     legend_loc : matplotlib.loc, optional
@@ -1050,6 +996,12 @@ def plot_rolling_sharpe(returns, rolling_window=APPROX_BDAYS_PER_MONTH * 6,
     rolling_sharpe_ts.plot(alpha=.7, lw=3, color='orangered', ax=ax,
                            **kwargs)
 
+    if factor_returns is not None:
+        rolling_sharpe_ts_factor = timeseries.rolling_sharpe(
+            factor_returns, rolling_window)
+        rolling_sharpe_ts_factor.plot(alpha=.7, lw=3, color='grey', ax=ax,
+                                      **kwargs)
+
     ax.set_title('Rolling Sharpe ratio (6-month)')
     ax.axhline(
         rolling_sharpe_ts.mean(),
@@ -1060,8 +1012,13 @@ def plot_rolling_sharpe(returns, rolling_window=APPROX_BDAYS_PER_MONTH * 6,
 
     ax.set_ylabel('Sharpe ratio')
     ax.set_xlabel('')
-    ax.legend(['Sharpe', 'Average'],
-              loc=legend_loc, frameon=True, framealpha=0.5)
+    if factor_returns is None:
+        ax.legend(['Sharpe', 'Average'],
+                  loc=legend_loc, frameon=True, framealpha=0.5)
+    else:
+        ax.legend(['Sharpe', 'Benchmark Sharpe', 'Average'],
+                  loc=legend_loc, frameon=True, framealpha=0.5)
+
     return ax
 
 
@@ -1207,12 +1164,6 @@ def show_and_plot_top_positions(returns, positions_alloc,
                           float_format='{0:.2f}%'.format,
                           name='Top 10 positions of all time')
 
-        _, _, df_top_abs_all = pos.get_top_long_short_abs(
-            positions_alloc, top=9999)
-        utils.print_table(pd.DataFrame(df_top_abs_all * 100, columns=['max']),
-                          float_format='{0:.2f}%'.format,
-                          name='All positions ever held')
-
     if show_and_plot == 0 or show_and_plot == 2:
 
         if ax is None:
@@ -1235,7 +1186,7 @@ def show_and_plot_top_positions(returns, positions_alloc,
             ax.legend(loc=legend_loc)
 
         ax.set_xlim((returns.index[0], returns.index[-1]))
-        ax.set_ylabel('Exposure by stock')
+        ax.set_ylabel('Exposure by holding')
 
         if hide_positions:
             ax.legend_.remove()
